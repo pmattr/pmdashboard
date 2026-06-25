@@ -16,8 +16,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const GH_CONFIG = {
-  owner: 'vandanasarahroy',
-  repo:  'Program-Delivery-Dashboard',
+  owner: 'pmattr',
+  repo:  'pmdashboard',
   path:  'data.json',
   branch: 'main',
   token: '',   // leave blank to be prompted, or paste your ghp_... token here
@@ -46,7 +46,6 @@ function _clearToken() {
 const _apiBase = `https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${GH_CONFIG.path}`;
 
 async function _readFile() {
-  // Use raw URL — no auth needed for public repos, much faster
   const url = `https://raw.githubusercontent.com/${GH_CONFIG.owner}/${GH_CONFIG.repo}/${GH_CONFIG.branch}/${GH_CONFIG.path}?_=${Date.now()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Could not read data.json (${res.status})`);
@@ -55,8 +54,6 @@ async function _readFile() {
 
 async function _writeFile(data) {
   const token = _getToken();
-
-  // First get the current file SHA (required by GitHub API to update a file)
   const metaRes = await fetch(`${_apiBase}?ref=${GH_CONFIG.branch}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
   });
@@ -65,15 +62,12 @@ async function _writeFile(data) {
     throw new Error(`GitHub API error (${metaRes.status})`);
   }
   const meta = await metaRes.json();
-
-  // Commit the updated JSON
   const body = {
     message: `Dashboard update ${new Date().toISOString().slice(0,16).replace('T',' ')}`,
     content: btoa(unescape(encodeURIComponent(JSON.stringify(data, null, 2)))),
     sha: meta.sha,
     branch: GH_CONFIG.branch,
   };
-
   const putRes = await fetch(_apiBase, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
@@ -88,27 +82,23 @@ async function _writeFile(data) {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 const GitHubDB = {
+  _data: null,
 
-  _data: null,  // in-memory cache of the full data.json
-
-  // Load data from GitHub and update the dashboard globals
   async load() {
     _showBanner('Loading data from GitHub…', 'info');
     try {
       const data = await _readFile();
       GitHubDB._data = data;
-
-      if (data.rows       && data.rows.length)       window.ROWS     = data.rows;
-      if (data.gantt      && data.gantt.length)       window.GANTT    = data.gantt;
-      if (data.iterations && Object.keys(data.iterations).length) window.ALL_ITER = data.iterations;
-
+      if (data.rows       && data.rows.length)                       window.ROWS     = data.rows;
+      if (data.gantt      && data.gantt.length)                      window.GANTT    = data.gantt;
+      if (data.iterations && Object.keys(data.iterations).length)    window.ALL_ITER = data.iterations;
       _showBanner('Data loaded from GitHub', 'success');
       setTimeout(_hideBanner, 2500);
-
       if (typeof buildOv    === 'function') buildOv();
       if (typeof buildRm    === 'function') buildRm();
       if (typeof buildGantt === 'function') buildGantt();
-
+      if (typeof renderRoadmap    === 'function') renderRoadmap();
+      if (typeof renderIterations === 'function') renderIterations();
     } catch (err) {
       console.error('[GitHubDB] load error:', err);
       _showBanner('GitHub load failed — using built-in data. ' + err.message, 'warning');
@@ -116,18 +106,17 @@ const GitHubDB = {
     }
   },
 
-  // Save everything back to GitHub as one commit
   async save() {
     _showBanner('Saving to GitHub…', 'info');
     try {
       const payload = {
-        rows:       window.ROWS  || [],
-        gantt:      window.GANTT || [],
+        rows:       window.ROWS     || [],
+        gantt:      window.GANTT    || [],
         iterations: window.ALL_ITER || {},
       };
       await _writeFile(payload);
       GitHubDB._data = payload;
-      _showBanner('Saved to GitHub', 'success');
+      _showBanner('✓ Saved to GitHub', 'success');
       setTimeout(_hideBanner, 2500);
     } catch (err) {
       console.error('[GitHubDB] save error:', err);
@@ -135,7 +124,6 @@ const GitHubDB = {
     }
   },
 
-  // Change the PAT (e.g. if it expired)
   resetToken() {
     _clearToken();
     _showBanner('Token cleared — you will be prompted on next save', 'info');
@@ -177,23 +165,17 @@ function _injectStyles() {
 
 function _injectUI() {
   _injectStyles();
-
   const btn = document.createElement('button');
-  btn.id = 'gh-edit-btn';
-  btn.className = 'off';
-  btn.textContent = '✎ Edit';
+  btn.id = 'gh-edit-btn'; btn.className = 'off'; btn.textContent = '✎ Edit';
   btn.onclick = _toggleEdit;
   document.body.appendChild(btn);
-
   const bar = document.createElement('div');
   bar.id = 'gh-save-bar';
   bar.innerHTML = `<span id="gh-change-count">0 changes</span><button class="discard" id="gh-discard">Discard</button><button class="save" id="gh-save">Save to GitHub</button>`;
   document.body.appendChild(bar);
-
   const banner = document.createElement('div');
   banner.id = 'gh-banner';
   document.body.appendChild(banner);
-
   document.getElementById('gh-save').onclick    = _saveAll;
   document.getElementById('gh-discard').onclick = _discard;
 }
@@ -201,13 +183,12 @@ function _injectUI() {
 function _toggleEdit() {
   _editMode = !_editMode;
   const btn = document.getElementById('gh-edit-btn');
-  btn.className = _editMode ? 'on' : 'off';
+  btn.className   = _editMode ? 'on' : 'off';
   btn.textContent = _editMode ? '✎ Editing' : '✎ Edit';
   _editMode ? _activateEdit() : _deactivateEdit();
 }
 
 function _activateEdit() {
-  // Stamp data-row-id and data-col onto table rows
   document.querySelectorAll('table tbody tr').forEach(tr => {
     const cells = tr.querySelectorAll('td');
     if (cells.length < 4) return;
@@ -218,114 +199,59 @@ function _activateEdit() {
     const COL_MAP = {3:'status', 4:'date', 5:'owner', 7:'notes'};
     cells.forEach((td, i) => { if (COL_MAP[i]) td.dataset.col = COL_MAP[i]; });
   });
-
   document.querySelectorAll('tr[data-row-id]').forEach(tr => {
     const id  = parseInt(tr.dataset.rowId);
     const row = (window.ROWS || []).find(r => r.id === id);
     if (!row) return;
-
     tr.querySelectorAll('td[data-col]').forEach(td => {
       const col = td.dataset.col;
       if (col === 'status') {
-        const sel = document.createElement('select');
-        sel.className = 'gh-select';
-        _STATUS_OPTS.forEach(o => {
-          const opt = document.createElement('option');
-          opt.value = o.v; opt.textContent = o.l;
-          if (o.v === row.s) opt.selected = true;
-          sel.appendChild(opt);
-        });
+        const sel = document.createElement('select'); sel.className = 'gh-select';
+        _STATUS_OPTS.forEach(o => { const opt = document.createElement('option'); opt.value = o.v; opt.textContent = o.l; if (o.v === row.s) opt.selected = true; sel.appendChild(opt); });
         sel.onchange = () => { row.s = sel.value; _dirtyRow(id, tr); };
         td.innerHTML = ''; td.appendChild(sel);
       }
       if (col === 'owner' || col === 'date' || col === 'notes') {
-        td.contentEditable = 'true';
-        td.classList.add('gh-editable');
-        td.oninput = () => {
-          if (col === 'owner') row.o = td.textContent.trim();
-          if (col === 'date')  row.d = td.textContent.trim();
-          if (col === 'notes') row.n = td.textContent.trim();
-          _dirtyRow(id, tr);
-        };
+        td.contentEditable = 'true'; td.classList.add('gh-editable');
+        td.oninput = () => { if (col==='owner') row.o=td.textContent.trim(); if (col==='date') row.d=td.textContent.trim(); if (col==='notes') row.n=td.textContent.trim(); _dirtyRow(id, tr); };
       }
     });
   });
-
-  // Iteration health + status
   document.querySelectorAll('[data-col][data-iter-key]').forEach(el => {
-    const key  = el.dataset.iterKey;
-    const name = el.dataset.iterName;
-    const col  = el.dataset.col;
-    const item = ((window.ALL_ITER || {})[key] || []).find(i => i.name === name);
+    const key=el.dataset.iterKey, name=el.dataset.iterName, col=el.dataset.col;
+    const item=((window.ALL_ITER||{})[key]||[]).find(i=>i.name===name);
     if (!item) return;
-
-    if (col === 'health') {
-      el.style.cursor = 'pointer';
-      el.title = 'Click to cycle health';
-      el.onclick = () => {
-        const next = _HEALTH_OPTS[(_HEALTH_OPTS.indexOf(item.health) + 1) % _HEALTH_OPTS.length];
-        item.health = next;
-        el.textContent = next;
-        el.className = el.className.replace(/health-\w+/, 'health-' + next);
-        _dirtyIter(key, name);
-      };
-    }
-    if (col === 'status') {
-      const sel = document.createElement('select');
-      sel.className = 'gh-select';
-      _ITER_STATUS.forEach(v => {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = v;
-        if (v === item.status) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.onchange = () => { item.status = sel.value; _dirtyIter(key, name); };
-      el.replaceWith(sel);
-      Object.assign(sel.dataset, {col, iterKey: key, iterName: name});
-    }
+    if (col==='health') { el.style.cursor='pointer'; el.title='Click to cycle'; el.onclick=()=>{ const next=_HEALTH_OPTS[(_HEALTH_OPTS.indexOf(item.health)+1)%_HEALTH_OPTS.length]; item.health=next; el.textContent=next; el.className=el.className.replace(/health-\w+/,'health-'+next); _dirtyIter(key,name); }; }
+    if (col==='status') { const sel=document.createElement('select'); sel.className='gh-select'; _ITER_STATUS.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;if(v===item.status)o.selected=true;sel.appendChild(o);}); sel.onchange=()=>{item.status=sel.value;_dirtyIter(key,name);}; el.replaceWith(sel); Object.assign(sel.dataset,{col,iterKey:key,iterName:name}); }
   });
 }
 
 function _deactivateEdit() {
-  document.querySelectorAll('.gh-editable').forEach(td => {
-    td.contentEditable = 'false';
-    td.classList.remove('gh-editable');
-  });
+  document.querySelectorAll('.gh-editable').forEach(td => { td.contentEditable='false'; td.classList.remove('gh-editable'); });
   document.querySelectorAll('tr[data-row-id]').forEach(tr => tr.classList.remove('gh-dirty'));
-  _pendingRows = {}; _pendingIters = {};
+  _pendingRows={}; _pendingIters={};
   _refreshCount();
 }
 
-function _dirtyRow(id, tr) {
-  _pendingRows[id] = true;
-  tr.classList.add('gh-dirty');
-  _refreshCount();
-}
-
-function _dirtyIter(key, name) {
-  _pendingIters[key + '|' + name] = true;
-  _refreshCount();
-}
+function _dirtyRow(id, tr)      { _pendingRows[id]=true; tr.classList.add('gh-dirty'); _refreshCount(); }
+function _dirtyIter(key, name)  { _pendingIters[key+'|'+name]=true; _refreshCount(); }
 
 function _refreshCount() {
   const n = Object.keys(_pendingRows).length + Object.keys(_pendingIters).length;
   const bar = document.getElementById('gh-save-bar');
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   const cnt = document.getElementById('gh-change-count');
-  if (cnt) cnt.textContent = n + ' unsaved change' + (n !== 1 ? 's' : '');
+  if (cnt) cnt.textContent = n + ' unsaved change' + (n!==1?'s':'');
 }
 
 async function _saveAll() {
-  _pendingRows = {}; _pendingIters = {};
+  _pendingRows={}; _pendingIters={};
   document.querySelectorAll('tr.gh-dirty').forEach(tr => tr.classList.remove('gh-dirty'));
   _refreshCount();
   await GitHubDB.save();
 }
 
-function _discard() {
-  _editMode = true;
-  _toggleEdit();
-}
+function _discard() { _editMode=true; _toggleEdit(); }
 
 // ─── Banner ───────────────────────────────────────────────────────────────────
 
@@ -334,21 +260,44 @@ function _showBanner(msg, type) {
   const b = document.getElementById('gh-banner');
   if (!b) return;
   b.style.background = colors[type] || colors.info;
-  b.style.display = 'block';
-  b.style.opacity = '1';
+  b.style.display = 'block'; b.style.opacity = '1';
   b.textContent = msg;
 }
-
 function _hideBanner() {
   const b = document.getElementById('gh-banner');
-  if (b) { b.style.opacity = '0'; setTimeout(() => b.style.display = 'none', 300); }
+  if (b) { b.style.opacity='0'; setTimeout(()=>b.style.display='none', 300); }
+}
+
+// ─── Live polling — auto-refresh for all viewers when data.json changes ───────
+
+const POLL_INTERVAL_MS = 30_000;
+let _lastKnownSha = null;
+
+async function _getCurrentSha() {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${GH_CONFIG.path}?ref=${GH_CONFIG.branch}`, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) return null;
+    return (await res.json()).sha || null;
+  } catch { return null; }
+}
+
+async function _pollForChanges() {
+  if (_editMode) return;
+  const sha = await _getCurrentSha();
+  if (sha && _lastKnownSha && sha !== _lastKnownSha) {
+    _lastKnownSha = sha;
+    _showBanner('🔄 New data available — refreshing…', 'info');
+    await GitHubDB.load();
+  }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 async function _init() {
   _injectUI();
+  _lastKnownSha = await _getCurrentSha();
   await GitHubDB.load();
+  setInterval(_pollForChanges, POLL_INTERVAL_MS);
 }
 
 if (document.readyState === 'loading') {
@@ -356,5 +305,12 @@ if (document.readyState === 'loading') {
 } else {
   _init();
 }
+
+// Update SHA after save so we don't self-trigger a reload
+const _origSave = GitHubDB.save.bind(GitHubDB);
+GitHubDB.save = async function() {
+  await _origSave();
+  _lastKnownSha = await _getCurrentSha();
+};
 
 window.GitHubDB = GitHubDB;
