@@ -41,15 +41,39 @@ function _clearToken() {
   GH_CONFIG.token = '';
 }
 
+// ─── Local cache (localStorage fallback) ─────────────────────────────────────
+
+const _CACHE_KEY = `gh_cache_${GH_CONFIG.owner}_${GH_CONFIG.repo}`;
+
+function _saveCache(data) {
+  try { localStorage.setItem(_CACHE_KEY, JSON.stringify({ ts: Date.now(), data })); } catch {}
+}
+
+function _loadCache() {
+  try {
+    const raw = localStorage.getItem(_CACHE_KEY);
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    const ageMin = (Date.now() - ts) / 60000;
+    return { data, ageMin };
+  } catch { return null; }
+}
+
 // ─── GitHub API helpers ───────────────────────────────────────────────────────
 
 const _apiBase = `https://api.github.com/repos/${GH_CONFIG.owner}/${GH_CONFIG.repo}/contents/${GH_CONFIG.path}`;
 
 async function _readFile() {
   const url = `https://raw.githubusercontent.com/${GH_CONFIG.owner}/${GH_CONFIG.repo}/${GH_CONFIG.branch}/${GH_CONFIG.path}?_=${Date.now()}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Could not read data.json (${res.status})`);
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Could not read data.json (${res.status})`);
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function _writeFile(data) {
@@ -89,6 +113,7 @@ const GitHubDB = {
     try {
       const data = await _readFile();
       GitHubDB._data = data;
+      _saveCache(data);
       if (data.rows       && data.rows.length)                       window.ROWS     = data.rows;
       if (data.gantt      && data.gantt.length)                      window.GANTT    = data.gantt;
       if (data.iterations && Object.keys(data.iterations).length)    window.ALL_ITER = data.iterations;
@@ -101,8 +126,25 @@ const GitHubDB = {
       if (typeof renderIterations === 'function') renderIterations();
     } catch (err) {
       console.error('[GitHubDB] load error:', err);
-      _showBanner('GitHub load failed — using built-in data. ' + err.message, 'warning');
-      setTimeout(_hideBanner, 5000);
+      const cached = _loadCache();
+      if (cached) {
+        const { data, ageMin } = cached;
+        GitHubDB._data = data;
+        if (data.rows       && data.rows.length)                       window.ROWS     = data.rows;
+        if (data.gantt      && data.gantt.length)                      window.GANTT    = data.gantt;
+        if (data.iterations && Object.keys(data.iterations).length)    window.ALL_ITER = data.iterations;
+        const age = ageMin < 60 ? `${Math.round(ageMin)}m ago` : `${Math.round(ageMin/60)}h ago`;
+        _showBanner(`⚠️ GitHub unavailable — showing cached data (saved ${age})`, 'warning');
+        setTimeout(_hideBanner, 6000);
+        if (typeof buildOv    === 'function') buildOv();
+        if (typeof buildRm    === 'function') buildRm();
+        if (typeof buildGantt === 'function') buildGantt();
+        if (typeof renderRoadmap    === 'function') renderRoadmap();
+        if (typeof renderIterations === 'function') renderIterations();
+      } else {
+        _showBanner('⚠️ GitHub unavailable & no cached data — using built-in defaults', 'warning');
+        setTimeout(_hideBanner, 6000);
+      }
     }
   },
 
@@ -116,6 +158,7 @@ const GitHubDB = {
       };
       await _writeFile(payload);
       GitHubDB._data = payload;
+      _saveCache(payload);
       _showBanner('✓ Saved to GitHub', 'success');
       setTimeout(_hideBanner, 2500);
     } catch (err) {
